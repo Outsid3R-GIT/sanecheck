@@ -65,6 +65,10 @@ def init_db():
             """CREATE TABLE IF NOT EXISTS schemas(
                 source TEXT PRIMARY KEY, signature TEXT, learned_ts TEXT)"""
         )
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS contracts(
+                source TEXT PRIMARY KEY, contract TEXT, set_ts TEXT)"""
+        )
         cols = {r["name"] for r in c.execute("PRAGMA table_info(runs)")}
         for col in ("output_raw", "schema_sig"):
             if col not in cols:  # migrate databases created before these columns existed
@@ -135,6 +139,21 @@ async def ingest(request: Request, x_api_key: str = Header(default="")):
             if drift:
                 failures.append(drift)
 
+    # Contract: declared per run (payload "contract") or stored per source via POST /contract.
+    contract = body.get("contract") if isinstance(body.get("contract"), dict) else None
+    if contract is None:
+        with db() as c:
+            crow = c.execute("SELECT contract FROM contracts WHERE source=?", (source,)).fetchone()
+        if crow:
+            try:
+                contract = json.loads(crow["contract"])
+            except Exception:
+                contract = None
+    if contract:
+        violation = checks.check_contract(output, contract)
+        if violation:
+            failures.append(violation)
+
     status = "fail" if failures else "pass"
     excerpt = checks.as_text(output)[:1000]
     raw = json.dumps(output, ensure_ascii=False)[:RAW_CAP]
@@ -157,6 +176,25 @@ def schema_reset(source: str, x_api_key: str = Header(default="")):
     with db() as c:
         c.execute("DELETE FROM schemas WHERE source=?", (source,))
     return {"ok": True, "source": source}
+
+
+@app.post("/contract")
+async def set_contract(request: Request, source: str, x_api_key: str = Header(default="")):
+    """Store a contract for a source (JSON object body). Send {} to clear it."""
+    require_key(x_api_key)
+    try:
+        contract = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    if not isinstance(contract, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    with db() as c:
+        if contract:
+            c.execute("INSERT OR REPLACE INTO contracts(source,contract,set_ts) VALUES(?,?,?)",
+                      (source, json.dumps(contract), _now()))
+        else:
+            c.execute("DELETE FROM contracts WHERE source=?", (source,))
+    return {"ok": True, "source": source, "contract": contract}
 
 
 @app.get("/run/{run_id}")
@@ -223,6 +261,6 @@ def dashboard():
     out.append(
         "</table><p style='color:#888'>Schema drift: the first run per source sets the baseline shape "
         "(keys + types). To re-learn after an intentional change: POST /schema/reset?source=NAME "
-        "with your X-API-Key. Per-run detail: GET /run/{id}.</p></div>"
+        "with your X-API-Key. Per-run detail: GET /run/{id}. Contracts (job drift): send a 'contract' object with required fields / must_contain, or store one via POST /contract?source=NAME.</p></div>"
     )
     return "\n".join(out)

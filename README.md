@@ -46,6 +46,23 @@ header `X-API-Key`, JSON body with `source` = workflow name and `output` = the p
 Dockerfile included — works on Render, Railway, Fly. Set `SANECHECK_API_KEY` and either
 `ALERT_WEBHOOK` (Slack/Discord) or `ALERT_EMAIL_TO` + `SMTP_*`.
 
+## Contracts: declare what a good run must contain
+Schema drift catches shape changes. **Job drift** is subtler: the output is valid, but it quietly
+stops doing the original task. Declare a contract and SaneCheck fails the run when the evidence is missing:
+```json
+{ "source": "weekly-research", "output": { "...": "..." },
+  "contract": {
+    "required": ["summary", "sources[0].url", "confidence"],
+    "min_items": { "sources": 2 },
+    "patterns": { "confidence": "^(high|medium|low)$" },
+    "must_contain": ["Acme Corp", "Q3 2026"],
+    "must_not_contain": ["could not find", "as an AI"]
+  } }
+```
+Send it with each run (recommended: it lives next to your workflow), or store it once with
+`POST /contract?source=weekly-research` and the contract as the JSON body (`{}` clears it).
+Violations come back as `contract_violation`, listing every missing field, failed pattern or absent input.
+
 ## Roadmap (after signal)
 - LLM-based semantic check ("does this output actually complete the task?")
 - Hosted multi-tenant + per-user keys + billing (free / Pro / Team)

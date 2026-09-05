@@ -182,3 +182,58 @@ def run_checks(output, meta, cfg):
         except Exception as e:  # a check must never crash ingestion
             failures.append({"check": fn.__name__, "detail": f"check error: {e}"})
     return failures
+
+
+# ---- Contracts: declare what a GOOD run must contain (r/n8n feedback: "job drift") ----
+# The output can be structurally valid yet quietly stop doing the original task. A contract
+# lists the evidence a run must carry; missing evidence = failed run (contract_violation).
+
+def resolve_path(data, path):
+    """Resolve 'a.b[0].c' against nested dicts/lists. Returns (found, value)."""
+    cur = data
+    for token in re.findall(r"[^.\[\]]+|\[\d+\]", str(path)):
+        if token.startswith("["):
+            idx = int(token[1:-1])
+            if not isinstance(cur, list) or idx >= len(cur):
+                return False, None
+            cur = cur[idx]
+        else:
+            if not isinstance(cur, dict) or token not in cur:
+                return False, None
+            cur = cur[token]
+    return True, cur
+
+
+def _is_empty(v):
+    return v is None or v == [] or v == {} or (isinstance(v, str) and not v.strip())
+
+
+def check_contract(output, contract):
+    """Enforce a declared contract; returns one failure listing every violation, or None."""
+    if not isinstance(contract, dict) or not contract:
+        return None
+    data = as_data(output)
+    text = as_text(output).lower()
+    problems = []
+    for path in contract.get("required") or []:
+        found, val = resolve_path(data, path)
+        if not found or _is_empty(val):
+            problems.append(f"missing required field: {path}")
+    for path, pattern in (contract.get("patterns") or {}).items():
+        found, val = resolve_path(data, path)
+        if found and val is not None and not re.search(str(pattern), str(val)):
+            problems.append(f"field {path} does not match pattern {pattern}")
+    for path, n in (contract.get("min_items") or {}).items():
+        found, val = resolve_path(data, path)
+        count = len(val) if isinstance(val, (list, dict, str)) else 0
+        if not found or count < int(n):
+            problems.append(f"{path} has {count} items, expected at least {n}")
+    for s in contract.get("must_contain") or []:
+        if str(s).lower() not in text:
+            problems.append(f"output does not mention required input: '{s}'")
+    for s in contract.get("must_not_contain") or []:
+        if str(s).lower() in text:
+            problems.append(f"output contains forbidden marker: '{s}'")
+    if problems:
+        return {"check": "contract_violation", "detail": "; ".join(problems)}
+    return None
