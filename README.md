@@ -1,56 +1,53 @@
 # SaneCheck (MVP working name)
 
-**Silent-failure monitor for AI automations.** Your n8n / Make / Zapier / GPT workflow
+**Silent-failure monitor for automations.** Your n8n / Make / Zapier / GPT workflow
 sends its result here; SaneCheck flags outputs that are *"200 OK but actually wrong"*
-(empty, AI-refusal, error text, unfilled template, malformed JSON, runaway cost/loop)
 and alerts you — the blind spot normal uptime monitoring misses.
+
+Not just for AI steps. Most silent failures are plain node-output sloppiness:
+a date string landing in a number field, a `null` bleeding into an email template,
+a key that quietly disappeared. SaneCheck flags those on purpose.
+
+## Checks
+| check | catches |
+|---|---|
+| `empty_output`, `too_short` | nothing / almost nothing came back |
+| `refusal_detected` | the AI step refused instead of doing the task |
+| `error_marker` | error text, `undefined`, `null`, `NaN` inside the output |
+| `placeholder_leak` | unfilled `{{template}}`, `[name]`, lorem ipsum |
+| `malformed_json` | expected JSON, got something else (`CHECK_EXPECT_JSON=true`) |
+| `cost_spike`, `possible_loop` | tokens / steps above your limits (from `meta`) |
+| **`schema_drift`** | the output **shape** changed vs. this source's baseline: missing or new keys, type changes — even when every field looks valid |
+
+Schema drift: the **first run per `source` learns the shape** (keys + types, 3 levels deep).
+Changed the workflow on purpose? `POST /schema/reset?source=NAME` (with `X-API-Key`) and it re-learns.
 
 ## Run locally
 ```bash
 pip install -r requirements.txt
-# optional: copy .env.example -> set env vars (API key, email/webhook alerts)
 uvicorn app:app --host 0.0.0.0 --port 8000
 ```
-- Dashboard: http://localhost:8000/
-- Health: http://localhost:8000/health
+- Dashboard: http://localhost:8000/ — each run has a collapsible **raw JSON payload** for debugging
+- Per-run detail: `GET /run/{id}` · Health: `GET /health`
 
 ## Send a run (what your automation does at the end)
 `POST /ingest` with header `X-API-Key: <your key>` and JSON body:
 ```json
-{
-  "source": "my-lead-enricher",
-  "output": "As an AI language model, I cannot help with that.",
-  "meta": { "tokens": 1200, "steps": 3 }
-}
+{ "source": "my-lead-enricher", "output": { "name": "Ada", "age": 36 }, "meta": { "tokens": 1200 } }
 ```
-- `output` can be a string OR a JSON object/array (whatever your last node produced).
-- `meta` is optional (used for cost/loop checks).
-
-Test with curl:
-```bash
-curl -X POST http://localhost:8000/ingest \
-  -H "X-API-Key: changeme-123" -H "Content-Type: application/json" \
-  -d '{"source":"test","output":"","meta":{}}'
-# -> {"run_id":1,"status":"fail","failed_checks":[{"check":"empty_output",...}]}
-```
+`output` can be a string OR a JSON object/array. `meta` is optional.
 
 ## Wire into n8n (2 minutes)
-Add an **HTTP Request** node at the end of your workflow:
-- Method: `POST`, URL: `https://<your-host>/ingest`
-- Header: `X-API-Key` = your key
-- Body (JSON): `source` = your workflow name, `output` = the previous node's result
-  (e.g. `{{$json}}` or the specific field), `meta` optional.
+Add an **HTTP Request** node at the end of your workflow: `POST https://<your-host>/ingest`,
+header `X-API-Key`, JSON body with `source` = workflow name and `output` = the previous node's result
+(e.g. `{{ $json }}`). Silent failures show red on the dashboard and trigger your email / Slack alert.
 
-When a run silently fails, you get an email/Slack alert + it shows red on the dashboard.
-
-## What this validates
-The whole point of the MVP: deploy it, wire one real automation, share it in an
-n8n/Make community post, and watch whether builders install + use it. Real usage =
-the signal that decides if we build out (more checks, LLM semantic check, hosted
-multi-user tiers, community node). No usage = adjust the wedge.
+## Deploy
+Dockerfile included — works on Render, Railway, Fly. Set `SANECHECK_API_KEY` and either
+`ALERT_WEBHOOK` (Slack/Discord) or `ALERT_EMAIL_TO` + `SMTP_*`.
 
 ## Roadmap (after signal)
 - LLM-based semantic check ("does this output actually complete the task?")
-- Hosted multi-tenant + per-user API keys + billing (free / $19-29 Pro / Team)
+- Hosted multi-tenant + per-user keys + billing (free / Pro / Team)
 - n8n community node + Make/Zapier templates for 1-click wiring
-- Trends, quality-drift detection, per-source thresholds
+- Trends, per-source thresholds, pinned (explicit) schema baselines

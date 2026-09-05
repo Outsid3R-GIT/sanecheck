@@ -1,8 +1,11 @@
-"""SaneCheck — silent-failure checks for AI-automation outputs.
+"""SaneCheck — silent-failure checks for automation outputs.
 
-Each check inspects a run's output/meta and returns a failure dict or None.
-The point: catch outputs that are HTTP-200 "successful" but actually WRONG
-(empty, refusal, error text, unfilled template, malformed, runaway cost/loop).
+Catch outputs that are HTTP-200 "successful" but actually WRONG. Not only AI
+hallucinations: most silent failures are plain node-output sloppiness — a date
+string landing in a number field, a null bleeding into an email template, a key
+that quietly disappeared. Checks: empty / too_short / refusal / error_marker /
+placeholder_leak / malformed_json / cost_spike / possible_loop, plus
+schema_drift (the output SHAPE changed vs. the learned baseline for the source).
 """
 import json
 import re
@@ -34,6 +37,74 @@ def as_text(output):
         except Exception:
             return str(output)
     return str(output)
+
+
+def as_data(output):
+    """Structured view: dict/list pass through; JSON-looking strings get parsed."""
+    if isinstance(output, (dict, list)):
+        return output
+    if isinstance(output, str):
+        s = output.strip()
+        if s[:1] in ("{", "["):
+            try:
+                return json.loads(s)
+            except Exception:
+                return output
+    return output
+
+
+def schema_signature(value, depth=3):
+    """Shape of a value: key set + value types, recursive to `depth` levels."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, dict):
+        if depth <= 0:
+            return "object"
+        return {k: schema_signature(v, depth - 1) for k, v in sorted(value.items())}
+    if isinstance(value, list):
+        if depth <= 0 or not value:
+            return "array"
+        return [schema_signature(value[0], depth - 1)]
+    return type(value).__name__
+
+
+def _short(sig):
+    if isinstance(sig, dict):
+        return "object{" + ",".join(sig.keys()) + "}"
+    if isinstance(sig, list):
+        return "array"
+    return str(sig)
+
+
+def describe_drift(baseline, current):
+    if isinstance(baseline, dict) and isinstance(current, dict):
+        added = sorted(set(current) - set(baseline))
+        removed = sorted(set(baseline) - set(current))
+        changed = sorted(k for k in set(baseline) & set(current) if baseline[k] != current[k])
+        parts = []
+        if removed:
+            parts.append("missing keys: " + ", ".join(removed))
+        if added:
+            parts.append("new keys: " + ", ".join(added))
+        if changed:
+            parts.append("type changed: " + ", ".join(
+                f"{k} ({_short(baseline[k])} -> {_short(current[k])})" for k in changed))
+        return "; ".join(parts) or "shape changed"
+    return f"shape changed: {_short(baseline)} -> {_short(current)}"
+
+
+def check_schema_drift(current_sig, baseline_sig):
+    """Flag when this run's shape differs from the learned baseline for the source."""
+    if baseline_sig is None or current_sig == baseline_sig:
+        return None
+    return {"check": "schema_drift",
+            "detail": "Output shape changed vs. baseline: " + describe_drift(baseline_sig, current_sig)}
 
 
 def check_empty(output, cfg, meta):
@@ -101,7 +172,7 @@ ALL_CHECKS = [
 
 
 def run_checks(output, meta, cfg):
-    """Return a list of failure dicts (empty list = output looks sane)."""
+    """Stateless checks. schema_drift is applied by the app (it needs the stored baseline)."""
     failures = []
     for fn in ALL_CHECKS:
         try:
