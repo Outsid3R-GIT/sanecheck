@@ -63,6 +63,23 @@ Send it with each run (recommended: it lives next to your workflow), or store it
 `POST /contract?source=weekly-research` and the contract as the JSON body (`{}` clears it).
 Violations come back as `contract_violation`, listing every missing field, failed pattern or absent input.
 
+## Review queue: the human gate for meaning drift
+Contracts are the hard gate. Some runs pass every rule yet quietly change meaning; those belong
+in a **review queue**, not in "pass". Route them with a `review` block inside the contract, or from the
+workflow itself with `"review": true` in the payload:
+```json
+"contract": { "required": ["summary"], "review": {
+    "if_missing": ["sources[1].url"],
+    "if_contains": ["preliminary", "estimate"],
+    "sample_rate": 0.05 } }
+```
+Such runs get `status: "review"`, show up in the dashboard's **Needs review** list, and trigger a
+`needs_review` alert. Decide with `POST /review/{id}?decision=approve|reject` (X-API-Key). Rejecting
+with a rule hardens the source's contract, so the next occurrence fails automatically:
+```json
+{ "note": "wandered into last year's numbers", "add_rule": { "must_not_contain": ["FY2025"] } }
+```
+
 ## Roadmap (after signal)
 - LLM-based semantic check ("does this output actually complete the task?")
 - Hosted multi-tenant + per-user keys + billing (free / Pro / Team)

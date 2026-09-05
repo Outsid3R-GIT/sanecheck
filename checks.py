@@ -237,3 +237,34 @@ def check_contract(output, contract):
     if problems:
         return {"check": "contract_violation", "detail": "; ".join(problems)}
     return None
+
+
+# ---- Review routing (r/n8n feedback): contract = hard gate; runs that PASS it but may have
+# changed meaning go to a human review queue instead of silently passing. ----
+import random
+
+
+def evaluate_review(output, contract, body):
+    """Return the reasons (if any) to route a passing run to human review."""
+    reasons = []
+    if isinstance(body, dict) and body.get("review") is True:
+        note = str(body.get("review_note") or "").strip()
+        reasons.append("workflow requested review" + (f": {note}" if note else ""))
+    rv = contract.get("review") if isinstance(contract, dict) else None
+    if isinstance(rv, dict):
+        data = as_data(output)
+        text = as_text(output).lower()
+        for path in rv.get("if_missing") or []:
+            found, val = resolve_path(data, path)
+            if not found or _is_empty(val):
+                reasons.append(f"weak evidence, missing: {path}")
+        for s in rv.get("if_contains") or []:
+            if str(s).lower() in text:
+                reasons.append(f"possible meaning change, contains: '{s}'")
+        rate = rv.get("sample_rate")
+        try:
+            if rate and random.random() < float(rate):
+                reasons.append(f"sampled for review (rate {rate})")
+        except (TypeError, ValueError):
+            pass
+    return reasons

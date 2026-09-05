@@ -59,7 +59,8 @@ def init_db():
             """CREATE TABLE IF NOT EXISTS runs(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, source TEXT, status TEXT,
                 failed_checks TEXT, output_excerpt TEXT, meta TEXT,
-                output_raw TEXT, schema_sig TEXT)"""
+                output_raw TEXT, schema_sig TEXT,
+                review_state TEXT, review_reasons TEXT, review_note TEXT)"""
         )
         c.execute(
             """CREATE TABLE IF NOT EXISTS schemas(
@@ -70,7 +71,7 @@ def init_db():
                 source TEXT PRIMARY KEY, contract TEXT, set_ts TEXT)"""
         )
         cols = {r["name"] for r in c.execute("PRAGMA table_info(runs)")}
-        for col in ("output_raw", "schema_sig"):
+        for col in ("output_raw", "schema_sig", "review_state", "review_reasons", "review_note"):
             if col not in cols:  # migrate databases created before these columns existed
                 c.execute(f"ALTER TABLE runs ADD COLUMN {col} TEXT")
 
@@ -154,19 +155,24 @@ async def ingest(request: Request, x_api_key: str = Header(default="")):
         if violation:
             failures.append(violation)
 
-    status = "fail" if failures else "pass"
+    review_reasons = [] if failures else checks.evaluate_review(output, contract, body)
+    status = "fail" if failures else ("review" if review_reasons else "pass")
     excerpt = checks.as_text(output)[:1000]
     raw = json.dumps(output, ensure_ascii=False)[:RAW_CAP]
     with db() as c:
         cur = c.execute(
-            "INSERT INTO runs(ts,source,status,failed_checks,output_excerpt,meta,output_raw,schema_sig)"
-            " VALUES(?,?,?,?,?,?,?,?)",
-            (_now(), source, status, json.dumps(failures), excerpt, json.dumps(meta), raw, sig_json),
+            "INSERT INTO runs(ts,source,status,failed_checks,output_excerpt,meta,output_raw,schema_sig,"
+            "review_state,review_reasons) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (_now(), source, status, json.dumps(failures), excerpt, json.dumps(meta), raw, sig_json,
+             "pending" if status == "review" else None, json.dumps(review_reasons)),
         )
         run_id = cur.lastrowid
     if failures:
         send_alert(source, failures, excerpt, run_id)
-    return JSONResponse({"run_id": run_id, "status": status, "failed_checks": failures, "schema": sig})
+    elif review_reasons:
+        send_alert(source, [{"check": "needs_review", "detail": "; ".join(review_reasons)}], excerpt, run_id)
+    return JSONResponse({"run_id": run_id, "status": status, "failed_checks": failures,
+                         "review_reasons": review_reasons, "schema": sig})
 
 
 @app.post("/schema/reset")
@@ -197,6 +203,41 @@ async def set_contract(request: Request, source: str, x_api_key: str = Header(de
     return {"ok": True, "source": source, "contract": contract}
 
 
+@app.post("/review/{run_id}")
+async def review_run(run_id: int, decision: str, request: Request, x_api_key: str = Header(default="")):
+    """Approve or reject a run in the review queue. Reject with {"note": ..., "add_rule": {...}}
+    to merge the rule into the source's stored contract, so the next occurrence fails automatically."""
+    require_key(x_api_key)
+    if decision not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="decision must be approve or reject")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    note = str(body.get("note") or "")[:1000]
+    merged = None
+    with db() as c:
+        r = c.execute("SELECT source FROM runs WHERE id=?", (run_id,)).fetchone()
+        if not r:
+            raise HTTPException(status_code=404, detail="no such run")
+        c.execute("UPDATE runs SET review_state=?, review_note=? WHERE id=?",
+                  ("approved" if decision == "approve" else "rejected", note, run_id))
+        rule = body.get("add_rule")
+        if decision == "reject" and isinstance(rule, dict) and rule:
+            crow = c.execute("SELECT contract FROM contracts WHERE source=?", (r["source"],)).fetchone()
+            merged = json.loads(crow["contract"]) if crow else {}
+            for k, vals in rule.items():
+                if isinstance(vals, list):
+                    merged[k] = list(dict.fromkeys((merged.get(k) or []) + vals))
+                elif isinstance(vals, dict):
+                    merged[k] = {**(merged.get(k) or {}), **vals}
+            c.execute("INSERT OR REPLACE INTO contracts(source,contract,set_ts) VALUES(?,?,?)",
+                      (r["source"], json.dumps(merged), _now()))
+    return {"ok": True, "run_id": run_id, "decision": decision, "contract": merged}
+
+
 @app.get("/run/{run_id}")
 def get_run(run_id: int):
     with db() as c:
@@ -206,7 +247,7 @@ def get_run(run_id: int):
     out = {}
     for k in r.keys():
         v = r[k]
-        if k in ("failed_checks", "meta", "schema_sig") and v:
+        if k in ("failed_checks", "meta", "schema_sig", "review_reasons") and v:
             try:
                 v = json.loads(v)
             except Exception:
@@ -231,17 +272,28 @@ def _pretty(raw):
 def dashboard():
     with db() as c:
         rows = c.execute("SELECT * FROM runs ORDER BY id DESC LIMIT 50").fetchall()
+        pending = c.execute("SELECT id, source, review_reasons FROM runs WHERE status='review' "
+                            "AND (review_state IS NULL OR review_state='pending') ORDER BY id DESC LIMIT 20").fetchall()
     fails = sum(1 for r in rows if r["status"] == "fail")
+    reviews = sum(1 for r in rows if r["status"] == "review")
     out = [
         "<meta charset=utf-8><title>SaneCheck</title>",
         "<div style='font-family:sans-serif;max-width:1100px;margin:24px auto'>",
         "<h1>SaneCheck</h1>",
-        f"<p>Last {len(rows)} runs. <b style='color:#c0392b'>{fails} silent failures</b> caught.</p>",
+        f"<p>Last {len(rows)} runs. <b style='color:#c0392b'>{fails} silent failures</b> caught, "
+        f"<b style='color:#e67e22'>{reviews} routed to review</b>.</p>",
         ("<p style='background:#f6f6f6;padding:10px;border-radius:6px'>No runs yet. "
          "Send one from your workflow, or try: <code>curl -X POST https://&lt;your-host&gt;/ingest "
          "-H 'X-API-Key: KEY' -H 'Content-Type: application/json' "
          "-d '{&quot;source&quot;:&quot;demo&quot;,&quot;output&quot;:{&quot;name&quot;:&quot;Ada&quot;,&quot;age&quot;:36}}'</code></p>"
          if not rows else ""),
+        (("<h2 style='color:#e67e22;font-size:18px'>Needs review (" + str(len(pending)) + ")</h2><ul>"
+          + "".join(
+              f"<li>#{q['id']} <b>{html.escape(q['source'])}</b>: "
+              f"{html.escape('; '.join(json.loads(q['review_reasons'] or '[]')))} "
+              f"<span style='color:#888'>decide: POST /review/{q['id']}?decision=approve|reject with X-API-Key</span></li>"
+              for q in pending)
+          + "</ul>") if pending else ""),
         "<table border=1 cellpadding=6 style='border-collapse:collapse;width:100%'>",
         "<tr><th>#</th><th>time (UTC)</th><th>source</th><th>status</th>"
         "<th>failed checks</th><th>payload</th></tr>",
@@ -249,7 +301,7 @@ def dashboard():
     for r in rows:
         fc = json.loads(r["failed_checks"] or "[]")
         fc_txt = "<br>".join(html.escape(f"{x['check']}: {x['detail']}") for x in fc) or "&mdash;"
-        color = "#c0392b" if r["status"] == "fail" else "#27ae60"
+        color = "#c0392b" if r["status"] == "fail" else ("#e67e22" if r["status"] == "review" else "#27ae60")
         raw = r["output_raw"] if ("output_raw" in r.keys() and r["output_raw"]) else (r["output_excerpt"] or "")
         out.append(
             f"<tr><td>{r['id']}</td><td>{r['ts']}</td><td>{html.escape(r['source'])}</td>"
@@ -261,6 +313,6 @@ def dashboard():
     out.append(
         "</table><p style='color:#888'>Schema drift: the first run per source sets the baseline shape "
         "(keys + types). To re-learn after an intentional change: POST /schema/reset?source=NAME "
-        "with your X-API-Key. Per-run detail: GET /run/{id}. Contracts (job drift): send a 'contract' object with required fields / must_contain, or store one via POST /contract?source=NAME.</p></div>"
+        "with your X-API-Key. Per-run detail: GET /run/{id}. Review: a passing run can be routed to a human via contract.review (if_missing / if_contains / sample_rate) or payload review:true; reject with add_rule to harden the contract. Contracts (job drift): send a 'contract' object with required fields / must_contain, or store one via POST /contract?source=NAME.</p></div>"
     )
     return "\n".join(out)
