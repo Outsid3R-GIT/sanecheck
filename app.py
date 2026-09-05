@@ -199,6 +199,11 @@ def dashboard():
         "<div style='font-family:sans-serif;max-width:1100px;margin:24px auto'>",
         "<h1>SaneCheck</h1>",
         f"<p>Last {len(rows)} runs. <b style='color:#c0392b'>{fails} silent failures</b> caught.</p>",
+        ("<p style='background:#f6f6f6;padding:10px;border-radius:6px'>No runs yet. "
+         "Send one from your workflow, or try: <code>curl -X POST https://&lt;your-host&gt;/ingest "
+         "-H 'X-API-Key: KEY' -H 'Content-Type: application/json' "
+         "-d '{&quot;source&quot;:&quot;demo&quot;,&quot;output&quot;:{&quot;name&quot;:&quot;Ada&quot;,&quot;age&quot;:36}}'</code></p>"
+         if not rows else ""),
         "<table border=1 cellpadding=6 style='border-collapse:collapse;width:100%'>",
         "<tr><th>#</th><th>time (UTC)</th><th>source</th><th>status</th>"
         "<th>failed checks</th><th>payload</th></tr>",
