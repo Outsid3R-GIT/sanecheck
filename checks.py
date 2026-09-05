@@ -23,9 +23,12 @@ ERROR_MARKERS = [
     "undefined", "null", "nan",
 ]
 PLACEHOLDER_MARKERS = [
-    "{{", "}}", "[insert", "lorem ipsum", "todo:", "your text here",
+    "[insert", "lorem ipsum", "todo:", "your text here",
     "<placeholder", "xxxxx", "[name]", "[company]",
 ]
+# An unfilled template expression: {{ $json.name }}, {{name}}, ${VAR}. Bare "}}" is NOT a marker:
+# any nested JSON object ends with "}}" (fixed after a false positive on nested outputs).
+TEMPLATE_RE = re.compile(r"\{\{\s*[^{}\s][^{}]{0,200}?\s*\}\}|\$\{[A-Za-z_][\w.\-]*\}")
 
 
 def as_text(output):
@@ -82,21 +85,33 @@ def _short(sig):
     return str(sig)
 
 
-def describe_drift(baseline, current):
+def _drift_parts(baseline, current, prefix, removed, added, changed):
+    """Walk both signatures; collect dotted paths so nested changes read as meta.id (number -> string)."""
     if isinstance(baseline, dict) and isinstance(current, dict):
-        added = sorted(set(current) - set(baseline))
-        removed = sorted(set(baseline) - set(current))
-        changed = sorted(k for k in set(baseline) & set(current) if baseline[k] != current[k])
-        parts = []
-        if removed:
-            parts.append("missing keys: " + ", ".join(removed))
-        if added:
-            parts.append("new keys: " + ", ".join(added))
-        if changed:
-            parts.append("type changed: " + ", ".join(
-                f"{k} ({_short(baseline[k])} -> {_short(current[k])})" for k in changed))
-        return "; ".join(parts) or "shape changed"
-    return f"shape changed: {_short(baseline)} -> {_short(current)}"
+        for k in sorted(set(baseline) - set(current)):
+            removed.append(prefix + k)
+        for k in sorted(set(current) - set(baseline)):
+            added.append(prefix + k)
+        for k in sorted(set(baseline) & set(current)):
+            if baseline[k] != current[k]:
+                _drift_parts(baseline[k], current[k], prefix + k + ".", removed, added, changed)
+    elif isinstance(baseline, list) and isinstance(current, list) and baseline and current:
+        _drift_parts(baseline[0], current[0], prefix[:-1] + "[]." if prefix else "[].", removed, added, changed)
+    else:
+        changed.append(f"{prefix[:-1] or 'output'} ({_short(baseline)} -> {_short(current)})")
+
+
+def describe_drift(baseline, current):
+    removed, added, changed = [], [], []
+    _drift_parts(baseline, current, "", removed, added, changed)
+    parts = []
+    if removed:
+        parts.append("missing keys: " + ", ".join(removed))
+    if added:
+        parts.append("new keys: " + ", ".join(added))
+    if changed:
+        parts.append("type changed: " + ", ".join(changed))
+    return "; ".join(parts) or "shape changed"
 
 
 def check_schema_drift(current_sig, baseline_sig):
@@ -136,6 +151,9 @@ def check_error_markers(output, cfg, meta):
 
 def check_placeholder_leak(output, cfg, meta):
     t = as_text(output).lower()
+    m = TEMPLATE_RE.search(as_text(output))
+    if m:
+        return {"check": "placeholder_leak", "detail": f"Unfilled template expression in output: '{m.group(0)[:60]}'."}
     for m in PLACEHOLDER_MARKERS:
         if m in t:
             return {"check": "placeholder_leak", "detail": f"Unfilled placeholder in output: '{m}'."}

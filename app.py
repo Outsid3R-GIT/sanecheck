@@ -40,7 +40,8 @@ CFG = {
     "max_steps": int(os.environ["CHECK_MAX_STEPS"]) if os.environ.get("CHECK_MAX_STEPS") else None,
 }
 
-app = FastAPI(title="SaneCheck MVP")
+VERSION = "0.4.1"
+app = FastAPI(title="SaneCheck MVP", version=VERSION)
 
 
 def _now():
@@ -313,6 +314,6 @@ def dashboard():
     out.append(
         "</table><p style='color:#888'>Schema drift: the first run per source sets the baseline shape "
         "(keys + types). To re-learn after an intentional change: POST /schema/reset?source=NAME "
-        "with your X-API-Key. Per-run detail: GET /run/{id}. Review: a passing run can be routed to a human via contract.review (if_missing / if_contains / sample_rate) or payload review:true; reject with add_rule to harden the contract. Contracts (job drift): send a 'contract' object with required fields / must_contain, or store one via POST /contract?source=NAME.</p></div>"
+        "with your X-API-Key. Per-run detail: GET /run/{id}. Review: a passing run can be routed to a human via contract.review (if_missing / if_contains / sample_rate) or payload review:true; reject with add_rule to harden the contract. Contracts (job drift): send a 'contract' object with required fields / must_contain, or store one via POST /contract?source=NAME.</p><p style='color:#aaa'>SaneCheck v" + VERSION + "</p></div>"
     )
     return "\n".join(out)
