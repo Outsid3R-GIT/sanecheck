@@ -102,3 +102,7 @@ offending call. The same check also catches the same sentence or list item repea
 - Hosted multi-tenant + per-user keys + billing (free / Pro / Team)
 - n8n community node + Make/Zapier templates for 1-click wiring
 - Trends, per-source thresholds, pinned (explicit) schema baselines
+
+## License and pricing
+Self-hosting is free under the **AGPL-3.0** (see `LICENSE`). Copyright (C) 2026 Outsid3R-GIT.
+The core stays open. A hosted version, no ops, persistent history, team alerts, is the planned paid tier.
