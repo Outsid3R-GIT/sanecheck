@@ -98,7 +98,10 @@ offending call. **Semantic thrash** is caught too, the agent permuting words on 
 arguments are canonicalized (flattened, keys sorted, lowercased, whitespace stripped, so
 `{"query": "Fix bug", "limit": 5}` and `{"limit": 5, "query": "fix bug "}` evaluate identically) and compared
 by Jaccard token overlap against the last 3 calls of the same tool; at `CHECK_THRASH_SIMILARITY` (default
-0.85) or above it is a loop. The same check also catches the same sentence or list item repeating in the
+0.85) or above it is a loop. **Valid retries are exempt:** give each call its transport status
+(`"status": 429`, a 5xx, `"timeout": true` or `"ok": false`) and a repeat after a failed call is not counted;
+only repeats after a successful call are, and a repeat after an empty or "not found" `result` says so in the
+alert. The same check also catches the same sentence or list item repeating in the
 output, and `meta.steps` above `CHECK_MAX_STEPS` still trips it. With strict mode on, all of these go straight
 to your dead-letter branch.
 

@@ -230,14 +230,64 @@ def _jaccard(a, b):
     return len(a & b) / len(a | b)
 
 
+def _call_status(call):
+    """'retryable' when the call itself failed in transport (408/425/429, 5xx, timeout, ok:false,
+    error), else 'success'. Repeating a retryable call is correct behaviour, not thrash."""
+    if not isinstance(call, dict):
+        return "success"
+    st = call.get("status", call.get("http_status", call.get("status_code")))
+    try:
+        st = int(st) if st is not None else None
+    except (TypeError, ValueError):
+        st = None
+    if st is not None and (st in (408, 425, 429) or st >= 500):
+        return "retryable"
+    if call.get("ok") is False or call.get("error") or call.get("timeout") is True:
+        return "retryable"
+    return "success"
+
+
+def _empty_result(call):
+    """A successful call that returned nothing useful: the classic trigger for stubborn re-querying."""
+    if not isinstance(call, dict) or "result" not in call:
+        return False
+    r = call.get("result")
+    if r is None or r == [] or r == {} or r == "":
+        return True
+    if isinstance(r, str):
+        low = r.strip().lower()
+        return not low or "not found" in low or "no results" in low
+    return False
+
+
+def _mark_retries(calls, threshold, window=3):
+    """A call that repeats (>= threshold) the closest similar previous call of the same tool is a valid
+    retry when that previous call failed in transport (429, 5xx, timeout). Those are exempt."""
+    canon = [_canon(c) for c in calls]
+    retry = [False] * len(calls)
+    for i, (name, toks) in enumerate(canon):
+        for j in range(i - 1, max(-1, i - window - 1), -1):
+            n, t = canon[j]
+            if n == name and _jaccard(toks, t) >= threshold:
+                retry[i] = _call_status(calls[j]) == "retryable"
+                break
+    return retry
+
+
 def _thrash(calls, threshold, window=3, max_repeat=3):
-    """Same tool, near-identical arguments against a rolling window of the last `window` calls."""
+    """Same tool, near-identical arguments against a rolling window of the last `window` calls.
+    Feed it non-retry calls only. Returns (tool, min similarity, count, after_empty_result)."""
     canon = [_canon(c) for c in calls]
     for i, (name, toks) in enumerate(canon):
-        sims = [_jaccard(toks, t) for (n, t) in canon[max(0, i - window):i] if n == name]
-        hits = [x for x in sims if x >= threshold]
+        prev = list(zip(canon[max(0, i - window):i], calls[max(0, i - window):i]))
+        hits = []
+        for (n, t), c in prev:
+            if n == name:
+                x = _jaccard(toks, t)
+                if x >= threshold:
+                    hits.append((x, c))
         if len(hits) >= max_repeat - 1:
-            return name, min(hits), len(hits) + 1
+            return name, min(x for x, _ in hits), len(hits) + 1, any(_empty_result(c) for _, c in hits)
     return None
 
 
@@ -250,18 +300,24 @@ def check_loop(output, cfg, meta):
     # Repeated tool signatures (r/n8n feedback): the same tool called with identical args again and again.
     calls = meta.get("tool_calls") or meta.get("calls")
     if isinstance(calls, list) and calls:
-        sig, n = _most_repeated(_call_signature(c) for c in calls)
+        th = float(cfg.get("thrash_similarity") or 0.85)
+        # Valid retries are exempt (r/n8n feedback): repeating a call whose previous attempt failed in
+        # transport (429, 5xx, timeout) is what an agent should do. Only repeats after a success count.
+        retry = _mark_retries(calls, th)
+        kept = [c for c, r in zip(calls, retry) if not r]
+        sig, n = _most_repeated(_call_signature(c) for c in kept)
         if n >= max_repeat:
+            why = " after an empty result" if any(_empty_result(c) for c in kept if _call_signature(c) == sig) else ""
             return {"check": "possible_loop",
-                    "detail": f"Tool call repeated {n}x with identical arguments: {sig[:120]} (possible loop)."}
+                    "detail": f"Tool call repeated {n}x with identical arguments{why}: {sig[:120]} (possible loop)."}
         # Semantic thrash: the agent permutes words on the same failing query. Canonicalize + Jaccard
         # against the last 3 calls of the same tool; above the threshold it is a loop.
-        th = float(cfg.get("thrash_similarity") or 0.85)
-        hit = _thrash(calls, th, max_repeat=max_repeat)
+        hit = _thrash(kept, th, max_repeat=max_repeat)
         if hit:
-            name, sim, n = hit
+            name, sim, n, after_empty = hit
+            why = " after an empty result" if after_empty else ""
             return {"check": "possible_loop",
-                    "detail": f"Semantic thrash: {name} called {n}x with near-identical arguments "
+                    "detail": f"Semantic thrash: {name} called {n}x with near-identical arguments{why} "
                               f"(similarity {sim:.2f} >= {th}) (possible loop)."}
     # Repeated content: the same non-trivial sentence/line or list item over and over is what a text loop looks like.
     data = as_data(output)
