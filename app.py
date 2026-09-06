@@ -32,15 +32,17 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
 ALERT_WEBHOOK = os.environ.get("ALERT_WEBHOOK", "")  # generic JSON POST {"text": ...}
+STRICT = os.environ.get("SANECHECK_STRICT", "").lower()  # "1": failed runs answer HTTP 422; "review": review too
 
 CFG = {
     "min_length": int(os.environ.get("CHECK_MIN_LENGTH", "5")),
     "expect_json": os.environ.get("CHECK_EXPECT_JSON", "").lower() in ("1", "true", "yes"),
     "max_tokens": int(os.environ["CHECK_MAX_TOKENS"]) if os.environ.get("CHECK_MAX_TOKENS") else None,
     "max_steps": int(os.environ["CHECK_MAX_STEPS"]) if os.environ.get("CHECK_MAX_STEPS") else None,
+    "max_repeat": int(os.environ.get("CHECK_MAX_REPEAT", "3")),  # identical tool calls / lines before possible_loop
 }
 
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 app = FastAPI(title="SaneCheck MVP", version=VERSION)
 
 
@@ -172,8 +174,14 @@ async def ingest(request: Request, x_api_key: str = Header(default="")):
         send_alert(source, failures, excerpt, run_id)
     elif review_reasons:
         send_alert(source, [{"check": "needs_review", "detail": "; ".join(review_reasons)}], excerpt, run_id)
+    # Strict mode: answer 422 on a bad run so the caller's HTTP node errors and its error
+    # output becomes the dead-letter branch (payload "strict": true / "review", or SANECHECK_STRICT).
+    strict = body.get("strict")
+    if strict not in (True, "review"):
+        strict = True if STRICT in ("1", "true", "yes") else ("review" if STRICT == "review" else None)
+    code = 422 if (strict and status == "fail") or (strict == "review" and status == "review") else 200
     return JSONResponse({"run_id": run_id, "status": status, "failed_checks": failures,
-                         "review_reasons": review_reasons, "schema": sig})
+                         "review_reasons": review_reasons, "schema": sig}, status_code=code)
 
 
 @app.post("/schema/reset")
@@ -314,6 +322,6 @@ def dashboard():
     out.append(
         "</table><p style='color:#888'>Schema drift: the first run per source sets the baseline shape "
         "(keys + types). To re-learn after an intentional change: POST /schema/reset?source=NAME "
-        "with your X-API-Key. Per-run detail: GET /run/{id}. Review: a passing run can be routed to a human via contract.review (if_missing / if_contains / sample_rate) or payload review:true; reject with add_rule to harden the contract. Contracts (job drift): send a 'contract' object with required fields / must_contain, or store one via POST /contract?source=NAME.</p><p style='color:#aaa'>SaneCheck v" + VERSION + "</p></div>"
+        "with your X-API-Key. Per-run detail: GET /run/{id}. Review: a passing run can be routed to a human via contract.review (if_missing / if_contains / sample_rate) or payload review:true; reject with add_rule to harden the contract. Dead-letter: the response is synchronous, branch on status; or send strict:true (env SANECHECK_STRICT=1) and a failed run answers HTTP 422 so your node's error output fires. Loops: meta.tool_calls repeated with identical arguments, or the same line repeating in the output, flag possible_loop. Contracts (job drift): send a 'contract' object with required fields / must_contain, or store one via POST /contract?source=NAME.</p><p style='color:#aaa'>SaneCheck v" + VERSION + "</p></div>"
     )
     return "\n".join(out)

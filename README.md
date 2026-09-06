@@ -80,6 +80,23 @@ with a rule hardens the source's contract, so the next occurrence fails automati
 { "note": "wandered into last year's numbers", "add_rule": { "must_not_contain": ["FY2025"] } }
 ```
 
+## Dead-letter branch: route a bad run away the moment it smells off
+`/ingest` answers synchronously, so the node right after it can branch on the verdict:
+
+1. **IF node** on `{{ $json.status }}`: anything that is not `pass` goes to your dead-letter branch
+   (Slack message, a "needs attention" sheet, a Stop node), the rest continues.
+2. **Strict mode, no IF node needed:** send `"strict": true` in the payload (or set `SANECHECK_STRICT=1`)
+   and a failed run answers **HTTP 422**. The HTTP Request node itself errors, so with
+   *On Error: Continue (using error output)* its error output *is* the dead-letter branch.
+   `"strict": "review"` also 422s runs that landed in the review queue.
+
+## Loop detection: repeated tool signatures
+Agents rarely loop by crashing; they call the same tool with the same arguments again and again while the
+token balance melts. Send the agent's calls in `meta.tool_calls` (a list of `{"tool": ..., "args": ...}`
+or plain strings) and a signature repeated 3+ times (`CHECK_MAX_REPEAT`) flags `possible_loop` with the
+offending call. The same check also catches the same sentence or list item repeating in the output, and
+`meta.steps` above `CHECK_MAX_STEPS` still trips it.
+
 ## Roadmap (after signal)
 - LLM-based semantic check ("does this output actually complete the task?")
 - Hosted multi-tenant + per-user keys + billing (free / Pro / Team)

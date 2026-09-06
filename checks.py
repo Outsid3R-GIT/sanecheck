@@ -176,11 +176,42 @@ def check_cost_spike(output, cfg, meta):
         return {"check": "cost_spike", "detail": f"Tokens {tokens} > limit {limit}."}
 
 
+def _call_signature(call):
+    """tool name + canonical args, so identical calls collapse to one string."""
+    if isinstance(call, dict):
+        name = call.get("tool") or call.get("name") or call.get("function") or "?"
+        args = call.get("args", call.get("input", call.get("arguments", call.get("parameters"))))
+        return f"{name}({json.dumps(args, sort_keys=True, default=str, ensure_ascii=False)})"
+    return str(call)
+
+
+def _most_repeated(items):
+    counts = {}
+    for it in items:
+        counts[it] = counts.get(it, 0) + 1
+    return max(counts.items(), key=lambda kv: kv[1]) if counts else (None, 0)
+
+
 def check_loop(output, cfg, meta):
     steps = meta.get("steps") or meta.get("iterations")
     limit = cfg.get("max_steps")
     if steps and limit and steps > limit:
         return {"check": "possible_loop", "detail": f"Steps {steps} > limit {limit} (possible runaway loop)."}
+    max_repeat = int(cfg.get("max_repeat") or 3)
+    # Repeated tool signatures (r/n8n feedback): the same tool called with identical args again and again.
+    calls = meta.get("tool_calls") or meta.get("calls")
+    if isinstance(calls, list) and calls:
+        sig, n = _most_repeated(_call_signature(c) for c in calls)
+        if n >= max_repeat:
+            return {"check": "possible_loop",
+                    "detail": f"Tool call repeated {n}x with identical arguments: {sig[:120]} (possible loop)."}
+    # Repeated content: the same non-trivial sentence/line or list item over and over is what a text loop looks like.
+    data = as_data(output)
+    segments = [json.dumps(x, sort_keys=True, ensure_ascii=False) for x in data] if isinstance(data, list) else []
+    segments += [seg.strip() for seg in re.split(r"(?<=[.!?])\s+|\n+", as_text(output))]
+    seg, n = _most_repeated(x for x in segments if len(x) >= 20)
+    if n >= max_repeat:
+        return {"check": "possible_loop", "detail": f"Same content repeated {n}x in output: '{seg[:80]}' (possible loop)."}
 
 
 ALL_CHECKS = [
