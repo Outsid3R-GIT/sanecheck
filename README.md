@@ -94,13 +94,8 @@ with a rule hardens the source's contract, so the next occurrence fails automati
 Agents rarely loop by crashing; they call the same tool with the same arguments again and again while the
 token balance melts. Send the agent's calls in `meta.tool_calls` (a list of `{"tool": ..., "args": ...}`
 or plain strings) and a signature repeated 3+ times (`CHECK_MAX_REPEAT`) flags `possible_loop` with the
-offending call. **Semantic thrash** is caught too, the agent permuting words on the same failing query:
-arguments are canonicalized (flattened, keys sorted, lowercased, whitespace stripped, so
-`{"query": "Fix bug", "limit": 5}` and `{"limit": 5, "query": "fix bug "}` evaluate identically) and compared
-by Jaccard token overlap against the last 3 calls of the same tool; at `CHECK_THRASH_SIMILARITY` (default
-0.85) or above it is a loop. The same check also catches the same sentence or list item repeating in the
-output, and `meta.steps` above `CHECK_MAX_STEPS` still trips it. With strict mode on, all of these go straight
-to your dead-letter branch.
+offending call. The same check also catches the same sentence or list item repeating in the output, and
+`meta.steps` above `CHECK_MAX_STEPS` still trips it.
 
 ## Roadmap (after signal)
 - LLM-based semantic check ("does this output actually complete the task?")
