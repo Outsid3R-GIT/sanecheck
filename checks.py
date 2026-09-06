@@ -192,6 +192,55 @@ def _most_repeated(items):
     return max(counts.items(), key=lambda kv: kv[1]) if counts else (None, 0)
 
 
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_STR_CALL_RE = re.compile(r"^\s*([\w.\-]+)\s*\((.*)\)\s*$", re.S)
+
+
+def _flatten(v, prefix=""):
+    if isinstance(v, dict):
+        out = []
+        for k in sorted(v, key=str):
+            out += _flatten(v[k], f"{prefix}{k}.")
+        return out
+    if isinstance(v, list):
+        out = []
+        for i, x in enumerate(v):
+            out += _flatten(x, f"{prefix}{i}.")
+        return out
+    val = str(v).strip().lower()
+    return [f"{prefix[:-1]}={val}"] if prefix else [val]
+
+
+def _canon(call):
+    """Two-pass recipe from r/n8n (ParrotIntegrated): flatten args, sort keys, lowercase, strip
+    whitespace -> (tool name, token set). {"query":"Fix bug","limit":5} == {"limit":5,"query":"fix bug "}."""
+    if isinstance(call, dict):
+        name = str(call.get("tool") or call.get("name") or call.get("function") or "?")
+        args = call.get("args", call.get("input", call.get("arguments", call.get("parameters"))))
+    else:
+        m = _STR_CALL_RE.match(str(call))
+        name, args = (m.group(1), m.group(2)) if m else ("?", str(call))
+    text = " ".join(_flatten(args)) if args is not None else ""
+    return name.strip().lower(), set(_TOKEN_RE.findall(text))
+
+
+def _jaccard(a, b):
+    if not a and not b:
+        return 1.0
+    return len(a & b) / len(a | b)
+
+
+def _thrash(calls, threshold, window=3, max_repeat=3):
+    """Same tool, near-identical arguments against a rolling window of the last `window` calls."""
+    canon = [_canon(c) for c in calls]
+    for i, (name, toks) in enumerate(canon):
+        sims = [_jaccard(toks, t) for (n, t) in canon[max(0, i - window):i] if n == name]
+        hits = [x for x in sims if x >= threshold]
+        if len(hits) >= max_repeat - 1:
+            return name, min(hits), len(hits) + 1
+    return None
+
+
 def check_loop(output, cfg, meta):
     steps = meta.get("steps") or meta.get("iterations")
     limit = cfg.get("max_steps")
@@ -205,6 +254,15 @@ def check_loop(output, cfg, meta):
         if n >= max_repeat:
             return {"check": "possible_loop",
                     "detail": f"Tool call repeated {n}x with identical arguments: {sig[:120]} (possible loop)."}
+        # Semantic thrash: the agent permutes words on the same failing query. Canonicalize + Jaccard
+        # against the last 3 calls of the same tool; above the threshold it is a loop.
+        th = float(cfg.get("thrash_similarity") or 0.85)
+        hit = _thrash(calls, th, max_repeat=max_repeat)
+        if hit:
+            name, sim, n = hit
+            return {"check": "possible_loop",
+                    "detail": f"Semantic thrash: {name} called {n}x with near-identical arguments "
+                              f"(similarity {sim:.2f} >= {th}) (possible loop)."}
     # Repeated content: the same non-trivial sentence/line or list item over and over is what a text loop looks like.
     data = as_data(output)
     segments = [json.dumps(x, sort_keys=True, ensure_ascii=False) for x in data] if isinstance(data, list) else []
