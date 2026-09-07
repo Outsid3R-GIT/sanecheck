@@ -43,7 +43,7 @@ CFG = {
     "thrash_similarity": float(os.environ.get("CHECK_THRASH_SIMILARITY", "0.85")),  # Jaccard on canonicalized args
 }
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 app = FastAPI(title="SaneCheck MVP", version=VERSION)
 CANONICAL_URL = os.environ.get("SANECHECK_CANONICAL_URL", "").rstrip("/")  # e.g. https://sanecheck.sanelabs.dev
 

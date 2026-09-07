@@ -1,5 +1,7 @@
 # SaneCheck (MVP working name)
 
+**Live demo:** https://sanecheck.sanelabs.dev (the dashboard, seeded with one run of every failure type). Part of [Sane Labs](https://sanelabs.dev).
+
 **Silent-failure monitor for automations.** Your n8n / Make / Zapier / GPT workflow
 sends its result here; SaneCheck flags outputs that are *"200 OK but actually wrong"*
 and alerts you — the blind spot normal uptime monitoring misses.
