@@ -45,6 +45,21 @@ CFG = {
 
 VERSION = "0.5.1"
 app = FastAPI(title="SaneCheck MVP", version=VERSION)
+CANONICAL_URL = os.environ.get("SANECHECK_CANONICAL_URL", "").rstrip("/")  # e.g. https://sanecheck.sanelabs.dev
+
+
+@app.middleware("http")
+async def canonical_redirect(request: Request, call_next):
+    """When set, any other hostname (say a retired free-tier deploy) answers 308 to the canonical URL,
+    so old links and old webhook targets keep working; 308 keeps POST as POST."""
+    if CANONICAL_URL:
+        host = request.headers.get("host", "").split(":")[0].lower()
+        canon_host = CANONICAL_URL.split("://", 1)[-1].split("/")[0].split(":")[0].lower()
+        if host and host != canon_host and host not in ("localhost", "127.0.0.1", "testserver"):
+            from fastapi.responses import RedirectResponse
+            target = CANONICAL_URL + request.url.path + ("?" + request.url.query if request.url.query else "")
+            return RedirectResponse(target, status_code=308)
+    return await call_next(request)
 
 
 def _now():
