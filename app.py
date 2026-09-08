@@ -15,6 +15,10 @@ import smtplib
 import urllib.request
 import datetime
 import html
+import random
+import threading
+import time
+import uuid
 from email.mime.text import MIMEText
 
 from fastapi import FastAPI, Request, Header, HTTPException
@@ -33,6 +37,9 @@ SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
 ALERT_WEBHOOK = os.environ.get("ALERT_WEBHOOK", "")  # generic JSON POST {"text": ...}
 STRICT = os.environ.get("SANECHECK_STRICT", "").lower()  # "1": failed runs answer HTTP 422; "review": review too
+# Anonymous usage ping (see README): instance uuid + version + runs bucket, on startup and daily. Off: SANECHECK_TELEMETRY=0
+TELEMETRY = os.environ.get("SANECHECK_TELEMETRY", "1").lower() not in ("0", "false", "no", "off")
+HEARTBEAT_URL = os.environ.get("SANECHECK_HEARTBEAT_URL", "https://sanecheck.sanelabs.dev/heartbeat")
 
 CFG = {
     "min_length": int(os.environ.get("CHECK_MIN_LENGTH", "5")),
@@ -43,7 +50,7 @@ CFG = {
     "thrash_similarity": float(os.environ.get("CHECK_THRASH_SIMILARITY", "0.85")),  # Jaccard on canonicalized args
 }
 
-VERSION = "0.5.2"
+VERSION = "0.6.0"
 app = FastAPI(title="SaneCheck MVP", version=VERSION)
 CANONICAL_URL = os.environ.get("SANECHECK_CANONICAL_URL", "").rstrip("/")  # e.g. https://sanecheck.sanelabs.dev
 
@@ -88,6 +95,12 @@ def init_db():
         c.execute(
             """CREATE TABLE IF NOT EXISTS contracts(
                 source TEXT PRIMARY KEY, contract TEXT, set_ts TEXT)"""
+        )
+        c.execute("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT)")
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS instances(
+                instance_id TEXT PRIMARY KEY, version TEXT, runs_bucket TEXT, platform TEXT,
+                first_seen TEXT, last_seen TEXT, pings INTEGER)"""
         )
         cols = {r["name"] for r in c.execute("PRAGMA table_info(runs)")}
         for col in ("output_raw", "schema_sig", "review_state", "review_reasons", "review_note"):
@@ -284,6 +297,92 @@ def get_run(run_id: int):
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+# ---- Anonymous usage ping: lets the maintainer see whether anyone actually runs this. ----
+def _instance_id():
+    with db() as c:
+        row = c.execute("SELECT value FROM settings WHERE key='instance_id'").fetchone()
+        if row:
+            return row["value"]
+        iid = str(uuid.uuid4())
+        c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('instance_id',?)", (iid,))
+        return iid
+
+
+def _runs_bucket():
+    with db() as c:
+        n = c.execute("SELECT COUNT(*) FROM runs WHERE datetime(ts) >= datetime('now','-1 day')").fetchone()[0]
+    return "0" if n == 0 else "1-10" if n <= 10 else "11-100" if n <= 100 else "100+"
+
+
+def heartbeat_payload():
+    return {"instance": _instance_id(), "version": VERSION, "runs_24h": _runs_bucket(),
+            "platform": "docker" if os.path.exists("/.dockerenv") else "other"}
+
+
+def _send_heartbeat():
+    try:
+        data = json.dumps(heartbeat_payload()).encode()
+        req = urllib.request.Request(HEARTBEAT_URL, data=data, method="POST",
+                                     headers={"Content-Type": "application/json", "User-Agent": f"SaneCheck/{VERSION}"})
+        urllib.request.urlopen(req, timeout=10).read()
+        return True
+    except Exception:
+        return False
+
+
+def _heartbeat_loop():
+    time.sleep(random.uniform(20, 90))
+    while True:
+        _send_heartbeat()
+        time.sleep(24 * 3600)
+
+
+@app.on_event("startup")
+def _start_heartbeat():
+    if TELEMETRY and HEARTBEAT_URL:
+        threading.Thread(target=_heartbeat_loop, daemon=True).start()
+
+
+@app.post("/heartbeat")
+async def heartbeat(request: Request):
+    """Receives the anonymous ping from self-hosted instances. Stores no IP, no content."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="json body required")
+    iid = str(body.get("instance", ""))[:64]
+    try:
+        uuid.UUID(iid)
+    except Exception:
+        raise HTTPException(status_code=400, detail="instance must be a UUID")
+    ver = str(body.get("version", ""))[:20]
+    bucket = str(body.get("runs_24h", ""))[:10]
+    plat = str(body.get("platform", ""))[:20]
+    with db() as c:
+        row = c.execute("SELECT pings FROM instances WHERE instance_id=?", (iid,)).fetchone()
+        if row:
+            c.execute("UPDATE instances SET version=?, runs_bucket=?, platform=?, last_seen=?, pings=pings+1 WHERE instance_id=?",
+                      (ver, bucket, plat, _now(), iid))
+        else:
+            c.execute("INSERT INTO instances(instance_id,version,runs_bucket,platform,first_seen,last_seen,pings) VALUES(?,?,?,?,?,?,1)",
+                      (iid, ver, bucket, plat, _now(), _now()))
+    return {"ok": True}
+
+
+@app.get("/stats")
+def stats(x_api_key: str = Header(default="")):
+    """Maintainer view of the pings: how many instances exist, how many were seen and used this week."""
+    require_key(x_api_key)
+    with db() as c:
+        total = c.execute("SELECT COUNT(*) FROM instances").fetchone()[0]
+        active7 = c.execute("SELECT COUNT(*) FROM instances WHERE datetime(last_seen) >= datetime('now','-7 day')").fetchone()[0]
+        used7 = c.execute("SELECT COUNT(*) FROM instances WHERE datetime(last_seen) >= datetime('now','-7 day') AND runs_bucket != '0'").fetchone()[0]
+        versions = {r[0]: r[1] for r in c.execute("SELECT version, COUNT(*) FROM instances GROUP BY version")}
+        newest = [dict(r) for r in c.execute(
+            "SELECT instance_id, version, runs_bucket, platform, first_seen, last_seen, pings FROM instances ORDER BY first_seen DESC LIMIT 20")]
+    return {"instances": total, "active_7d": active7, "used_7d": used7, "versions": versions, "newest": newest}
 
 
 def _pretty(raw):

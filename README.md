@@ -107,6 +107,14 @@ alert. The same check also catches the same sentence or list item repeating in t
 output, and `meta.steps` above `CHECK_MAX_STEPS` still trips it. With strict mode on, all of these go straight
 to your dead-letter branch.
 
+## Anonymous usage ping, and how to turn it off
+Each self-hosted instance sends one small heartbeat on startup and then once a day to
+`https://sanecheck.sanelabs.dev/heartbeat`: a random instance id (generated once, kept in your database), the
+SaneCheck version, the platform (docker or other) and a bucket of how many runs it checked in the last 24 hours
+(0, 1-10, 11-100, 100+). No outputs, no sources, no hostnames; the receiving end stores no IP address.
+It exists so I can tell whether anyone actually runs this, which decides whether it keeps getting built.
+Turn it off with `SANECHECK_TELEMETRY=0`.
+
 ## Roadmap (after signal)
 - LLM-based semantic check ("does this output actually complete the task?")
 - Hosted multi-tenant + per-user keys + billing (free / Pro / Team)
