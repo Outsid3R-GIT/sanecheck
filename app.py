@@ -50,7 +50,7 @@ CFG = {
     "thrash_similarity": float(os.environ.get("CHECK_THRASH_SIMILARITY", "0.85")),  # Jaccard on canonicalized args
 }
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 app = FastAPI(title="SaneCheck MVP", version=VERSION)
 CANONICAL_URL = os.environ.get("SANECHECK_CANONICAL_URL", "").rstrip("/")  # e.g. https://sanecheck.sanelabs.dev
 
@@ -341,7 +341,8 @@ def _heartbeat_loop():
 
 @app.on_event("startup")
 def _start_heartbeat():
-    if TELEMETRY and HEARTBEAT_URL:
+    # A mirror that redirects to a canonical URL is not an install of its own: it stays silent.
+    if TELEMETRY and HEARTBEAT_URL and not CANONICAL_URL:
         threading.Thread(target=_heartbeat_loop, daemon=True).start()
 
 
