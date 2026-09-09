@@ -15,6 +15,7 @@ import smtplib
 import urllib.request
 import datetime
 import html
+import shutil
 import random
 import threading
 import time
@@ -48,9 +49,12 @@ CFG = {
     "max_steps": int(os.environ["CHECK_MAX_STEPS"]) if os.environ.get("CHECK_MAX_STEPS") else None,
     "max_repeat": int(os.environ.get("CHECK_MAX_REPEAT", "3")),  # identical tool calls / lines before possible_loop
     "thrash_similarity": float(os.environ.get("CHECK_THRASH_SIMILARITY", "0.85")),  # Jaccard on canonicalized args
+    "volume_drop_ratio": float(os.environ.get("CHECK_VOLUME_DROP", "0.2")),  # flag when items < ratio * typical
+    "min_free_mb": int(os.environ.get("SANECHECK_MIN_FREE_MB", "2048")),  # disk_low alert threshold
+    "retention_days": int(os.environ.get("SANECHECK_RETENTION_DAYS", "90")),  # runs older than this are pruned daily
 }
 
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 app = FastAPI(title="SaneCheck MVP", version=VERSION)
 CANONICAL_URL = os.environ.get("SANECHECK_CANONICAL_URL", "").rstrip("/")  # e.g. https://sanecheck.sanelabs.dev
 
@@ -97,6 +101,10 @@ def init_db():
                 source TEXT PRIMARY KEY, contract TEXT, set_ts TEXT)"""
         )
         c.execute("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT)")
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS volumes(
+                source TEXT PRIMARY KEY, counts TEXT, updated TEXT)"""
+        )
         c.execute(
             """CREATE TABLE IF NOT EXISTS instances(
                 instance_id TEXT PRIMARY KEY, version TEXT, runs_bucket TEXT, platform TEXT,
@@ -172,6 +180,20 @@ async def ingest(request: Request, x_api_key: str = Header(default="")):
             if drift:
                 failures.append(drift)
 
+    # Volume baseline: the item count of recent good runs; a collapse to ~0 is a silent failure.
+    count = checks.item_count(output, meta)
+    if count is not None:
+        with db() as c:
+            vrow = c.execute("SELECT counts FROM volumes WHERE source=?", (source,)).fetchone()
+            history = json.loads(vrow["counts"]) if vrow else []
+            vdrop = checks.check_volume_drop(count, history, CFG["volume_drop_ratio"])
+            if vdrop:
+                failures.append(vdrop)
+            else:  # only normal runs feed the baseline
+                history = (history + [count])[-20:]
+                c.execute("INSERT OR REPLACE INTO volumes(source,counts,updated) VALUES(?,?,?)",
+                          (source, json.dumps(history), _now()))
+
     # Contract: declared per run (payload "contract") or stored per source via POST /contract.
     contract = body.get("contract") if isinstance(body.get("contract"), dict) else None
     if contract is None:
@@ -219,6 +241,15 @@ def schema_reset(source: str, x_api_key: str = Header(default="")):
     require_key(x_api_key)
     with db() as c:
         c.execute("DELETE FROM schemas WHERE source=?", (source,))
+    return {"ok": True, "source": source}
+
+
+@app.post("/volume/reset")
+def volume_reset(source: str, x_api_key: str = Header(default="")):
+    """Forget the learned item-count baseline for a source; it re-learns from the next runs."""
+    require_key(x_api_key)
+    with db() as c:
+        c.execute("DELETE FROM volumes WHERE source=?", (source,))
     return {"ok": True, "source": source}
 
 
@@ -294,9 +325,64 @@ def get_run(run_id: int):
     return out
 
 
+def disk_status():
+    """Size of the database and free space on the disk that holds it (the host disk for a Docker volume)."""
+    path = os.path.abspath(DB)
+    try:
+        db_mb = round(os.path.getsize(path) / 1048576, 1) if os.path.exists(path) else 0.0
+    except OSError:
+        db_mb = 0.0
+    try:
+        free_mb = int(shutil.disk_usage(os.path.dirname(path) or ".").free / 1048576)
+    except OSError:
+        free_mb = None
+    return {"db_mb": db_mb, "disk_free_mb": free_mb, "disk_low": free_mb is not None and free_mb < CFG["min_free_mb"]}
+
+
+def prune_runs():
+    """Keep the run history bounded: delete runs older than SANECHECK_RETENTION_DAYS."""
+    days = CFG["retention_days"]
+    if days <= 0:
+        return 0
+    with db() as c:
+        cur = c.execute("DELETE FROM runs WHERE datetime(ts) < datetime('now', ?)", (f"-{days} day",))
+        return cur.rowcount
+
+
+_last_disk_alert = [0.0]
+
+
+def disk_check_once():
+    """Alert (at most once a day) when the disk holding the database runs low."""
+    st = disk_status()
+    if st["disk_low"] and time.time() - _last_disk_alert[0] > 86400:
+        _last_disk_alert[0] = time.time()
+        send_alert("sanecheck-host", [{"check": "disk_low",
+                    "detail": f"Only {st['disk_free_mb']} MB free on the disk holding the database ({st['db_mb']} MB). "
+                              f"Prune old runs or grow the disk before things silently stop."}], "", 0)
+        return True
+    return False
+
+
+def _housekeeping_loop():
+    time.sleep(60)
+    while True:
+        try:
+            prune_runs()
+            disk_check_once()
+        except Exception:
+            pass
+        time.sleep(6 * 3600)
+
+
+@app.on_event("startup")
+def _start_housekeeping():
+    threading.Thread(target=_housekeeping_loop, daemon=True).start()
+
+
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, **disk_status()}
 
 
 # ---- Anonymous usage ping: lets the maintainer see whether anyone actually runs this. ----

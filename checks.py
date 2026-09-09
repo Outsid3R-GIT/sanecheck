@@ -431,3 +431,35 @@ def evaluate_review(output, contract, body):
         except (TypeError, ValueError):
             pass
     return reasons
+
+
+# ---- Volume baseline (n8n forum feedback): "the parser returns 0 items and the run is still a success". ----
+def item_count(output, meta):
+    """How many items a run produced: meta.count / items / items_out, else the length of the output list,
+    else the length of the first list field (items, results, data, rows, records, entries)."""
+    for k in ("count", "items", "items_out", "item_count"):
+        v = (meta or {}).get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return int(v)
+    data = as_data(output)
+    if isinstance(data, list):
+        return len(data)
+    if isinstance(data, dict):
+        for k in ("items", "results", "data", "rows", "records", "entries"):
+            if isinstance(data.get(k), list):
+                return len(data[k])
+    return None
+
+
+def check_volume_drop(count, history, ratio=0.2, min_history=3):
+    """Learned per-source baseline: flag a run whose item count collapses against the median of recent runs."""
+    if count is None or len(history) < min_history:
+        return None
+    hist = sorted(history)
+    median = hist[len(hist) // 2]
+    if median <= 0:
+        return None
+    if count == 0 or count < median * ratio:
+        return {"check": "volume_drop",
+                "detail": f"Only {count} item(s) this run; typical is {median} (median of the last {len(history)} runs)."}
+    return None

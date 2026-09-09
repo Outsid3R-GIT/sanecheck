@@ -115,6 +115,20 @@ SaneCheck version, the platform (docker or other) and a bucket of how many runs 
 It exists so I can tell whether anyone actually runs this, which decides whether it keeps getting built.
 Turn it off with `SANECHECK_TELEMETRY=0`.
 
+## Volume baseline: "0 items and the run is still a success"
+When the markup changes, a scraper's parser returns 0 items and every node stays green. SaneCheck learns how
+many items each source usually produces (from `meta.count`, or the length of the output list, or of its first
+list field such as `items` / `results` / `rows`) over its recent good runs, and flags `volume_drop` when a run
+collapses to 0 or below 20% of the typical count (`CHECK_VOLUME_DROP`). Re-learn with
+`POST /volume/reset?source=NAME`. For a hard floor, use `min_items` in a contract.
+
+## Disk and retention: the failure that is not a failed run
+Execution history grows until the disk is full and the instance just stops. SaneCheck bounds its own history
+(`SANECHECK_RETENTION_DAYS`, default 90), reports `db_mb` and `disk_free_mb` on `/health`, and sends a
+`disk_low` alert once a day when free space on the disk holding its database drops under
+`SANECHECK_MIN_FREE_MB` (default 2048). With a Docker volume that is the host disk, the same one n8n's
+own database lives on.
+
 ## Roadmap (after signal)
 - LLM-based semantic check ("does this output actually complete the task?")
 - Hosted multi-tenant + per-user keys + billing (free / Pro / Team)
