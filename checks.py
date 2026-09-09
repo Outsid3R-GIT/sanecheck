@@ -87,6 +87,9 @@ def _short(sig):
 
 def _drift_parts(baseline, current, prefix, removed, added, changed):
     """Walk both signatures; collect dotted paths so nested changes read as meta.id (number -> string)."""
+    # An array that is merely empty on one side is not a shape change (volume_drop covers "went empty").
+    if (baseline == "array" and isinstance(current, list)) or (current == "array" and isinstance(baseline, list)):
+        return
     if isinstance(baseline, dict) and isinstance(current, dict):
         for k in sorted(set(baseline) - set(current)):
             removed.append(prefix + k)
@@ -111,15 +114,17 @@ def describe_drift(baseline, current):
         parts.append("new keys: " + ", ".join(added))
     if changed:
         parts.append("type changed: " + ", ".join(changed))
-    return "; ".join(parts) or "shape changed"
+    return "; ".join(parts)
 
 
 def check_schema_drift(current_sig, baseline_sig):
-    """Flag when this run's shape differs from the learned baseline for the source."""
+    """Compare a run's shape with the learned baseline; empty-vs-filled arrays are not drift."""
     if baseline_sig is None or current_sig == baseline_sig:
         return None
-    return {"check": "schema_drift",
-            "detail": "Output shape changed vs. baseline: " + describe_drift(baseline_sig, current_sig)}
+    detail = describe_drift(baseline_sig, current_sig)
+    if not detail:
+        return None
+    return {"check": "schema_drift", "detail": "Output shape changed vs. baseline: " + detail}
 
 
 def check_empty(output, cfg, meta):

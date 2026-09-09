@@ -54,7 +54,7 @@ CFG = {
     "retention_days": int(os.environ.get("SANECHECK_RETENTION_DAYS", "90")),  # runs older than this are pruned daily
 }
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 app = FastAPI(title="SaneCheck MVP", version=VERSION)
 CANONICAL_URL = os.environ.get("SANECHECK_CANONICAL_URL", "").rstrip("/")  # e.g. https://sanecheck.sanelabs.dev
 
