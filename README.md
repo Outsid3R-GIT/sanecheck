@@ -119,8 +119,11 @@ Turn it off with `SANECHECK_TELEMETRY=0`.
 When the markup changes, a scraper's parser returns 0 items and every node stays green. SaneCheck learns how
 many items each source usually produces (from `meta.count`, or the length of the output list, or of its first
 list field such as `items` / `results` / `rows`) over its recent good runs, and flags `volume_drop` when a run
-collapses to 0 or below 20% of the typical count (`CHECK_VOLUME_DROP`). Re-learn with
-`POST /volume/reset?source=NAME`. For a hard floor, use `min_items` in a contract.
+collapses to 0 or below 20% of the typical count (`CHECK_VOLUME_DROP`). Weekdays and weekends get separate
+baselines (a Saturday run with 0 items can be normal while a Tuesday one is a broken parser); the workflow can
+override the calendar with `meta.daytype`: `weekday`, `weekend` or `holiday` (counts as weekend), and
+`CHECK_VOLUME_BUCKETS=flat` gives one baseline per source. Re-learn with `POST /volume/reset?source=NAME`.
+For a hard floor, use `min_items` in a contract.
 
 ## Disk and retention: the failure that is not a failed run
 Execution history grows until the disk is full and the instance just stops. SaneCheck bounds its own history

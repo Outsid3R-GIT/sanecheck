@@ -468,3 +468,18 @@ def check_volume_drop(count, history, ratio=0.2, min_history=3):
         return {"check": "volume_drop",
                 "detail": f"Only {count} item(s) this run; typical is {median} (median of the last {len(history)} runs)."}
     return None
+
+
+def day_bucket(meta, when=None, mode="weekday_weekend"):
+    """Which volume baseline a run belongs to. The workflow may say so itself (meta.daytype: weekday,
+    weekend or holiday; holiday counts as weekend); otherwise the UTC calendar decides."""
+    if mode == "flat":
+        return "all"
+    dt = str((meta or {}).get("daytype", "")).strip().lower()
+    if dt in ("weekend", "holiday"):
+        return "weekend"
+    if dt in ("weekday", "workday", "business"):
+        return "weekday"
+    import datetime as _dt
+    when = when or _dt.datetime.now(_dt.timezone.utc)
+    return "weekend" if when.weekday() >= 5 else "weekday"

@@ -50,11 +50,12 @@ CFG = {
     "max_repeat": int(os.environ.get("CHECK_MAX_REPEAT", "3")),  # identical tool calls / lines before possible_loop
     "thrash_similarity": float(os.environ.get("CHECK_THRASH_SIMILARITY", "0.85")),  # Jaccard on canonicalized args
     "volume_drop_ratio": float(os.environ.get("CHECK_VOLUME_DROP", "0.2")),  # flag when items < ratio * typical
+    "volume_buckets": os.environ.get("CHECK_VOLUME_BUCKETS", "weekday_weekend"),  # or "flat": one baseline per source
     "min_free_mb": int(os.environ.get("SANECHECK_MIN_FREE_MB", "2048")),  # disk_low alert threshold
     "retention_days": int(os.environ.get("SANECHECK_RETENTION_DAYS", "90")),  # runs older than this are pruned daily
 }
 
-VERSION = "0.7.1"
+VERSION = "0.8.0"
 app = FastAPI(title="SaneCheck MVP", version=VERSION)
 CANONICAL_URL = os.environ.get("SANECHECK_CANONICAL_URL", "").rstrip("/")  # e.g. https://sanecheck.sanelabs.dev
 
@@ -183,16 +184,20 @@ async def ingest(request: Request, x_api_key: str = Header(default="")):
     # Volume baseline: the item count of recent good runs; a collapse to ~0 is a silent failure.
     count = checks.item_count(output, meta)
     if count is not None:
+        bucket = checks.day_bucket(meta, mode=CFG["volume_buckets"])  # weekdays and weekends differ a lot
+        vkey = source if bucket == "all" else f"{source}|{bucket}"
         with db() as c:
-            vrow = c.execute("SELECT counts FROM volumes WHERE source=?", (source,)).fetchone()
+            vrow = c.execute("SELECT counts FROM volumes WHERE source=?", (vkey,)).fetchone()
             history = json.loads(vrow["counts"]) if vrow else []
             vdrop = checks.check_volume_drop(count, history, CFG["volume_drop_ratio"])
             if vdrop:
+                if bucket != "all":
+                    vdrop["detail"] = vdrop["detail"].replace("typical is", f"typical on {bucket}s is")
                 failures.append(vdrop)
             else:  # only normal runs feed the baseline
                 history = (history + [count])[-20:]
                 c.execute("INSERT OR REPLACE INTO volumes(source,counts,updated) VALUES(?,?,?)",
-                          (source, json.dumps(history), _now()))
+                          (vkey, json.dumps(history), _now()))
 
     # Contract: declared per run (payload "contract") or stored per source via POST /contract.
     contract = body.get("contract") if isinstance(body.get("contract"), dict) else None
@@ -249,7 +254,7 @@ def volume_reset(source: str, x_api_key: str = Header(default="")):
     """Forget the learned item-count baseline for a source; it re-learns from the next runs."""
     require_key(x_api_key)
     with db() as c:
-        c.execute("DELETE FROM volumes WHERE source=?", (source,))
+        c.execute("DELETE FROM volumes WHERE source=? OR source LIKE ?", (source, source + "|%"))
     return {"ok": True, "source": source}
 
 
